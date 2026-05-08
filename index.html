@@ -91,6 +91,7 @@ canvas { display: block; cursor: crosshair; }
     </div>
   </div>
   <div class="hint">
+    <b>空格+拖拽</b> 平移 &nbsp; <b>滚轮</b> 缩放<br>
     <b>N</b> 新建 &nbsp; <b>C</b> 连线 &nbsp; <b>V</b> 选择<br>
     <b>Del</b> 删除 &nbsp; <b>Esc</b> 取消
   </div>
@@ -117,6 +118,15 @@ let hoverBlock = null;
 let dragStart = null;
 let offsetX = 0, offsetY = 0;
 let nextId = 1;
+
+// 画布平移与缩放
+let panX = 0, panY = 0, zoom = 1;
+let isPanning = false, panStartX = 0, panStartY = 0, panStartPanX = 0, panStartPanY = 0;
+let spaceDown = false;
+
+function screenToWorld(sx, sy) {
+  return { x: (sx - panX) / zoom, y: (sy - panY) / zoom };
+}
 
 function resize() {
   canvas.width = container.clientWidth;
@@ -217,6 +227,9 @@ function drawArrow(ctx, x1, y1, x2, y2, isSel) {
 
 function render() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.save();
+  ctx.translate(panX, panY);
+  ctx.scale(zoom, zoom);
 
   connections.forEach(c => {
     const a = blocks.find(b => b.id === c.from);
@@ -229,14 +242,15 @@ function render() {
   });
 
   if (mode === 'connect' && connectFrom && mousePos) {
-    const [cx, cy] = anchor(connectFrom, {x: mousePos.x, y: mousePos.y});
+    const wp = screenToWorld(mousePos.x, mousePos.y);
+    const [cx, cy] = anchor(connectFrom, {x: wp.x, y: wp.y});
     ctx.save();
     ctx.strokeStyle = '#e94560';
     ctx.lineWidth = 2;
     ctx.setLineDash([6, 4]);
     ctx.beginPath();
     ctx.moveTo(cx, cy);
-    ctx.lineTo(mousePos.x, mousePos.y);
+    ctx.lineTo(wp.x, wp.y);
     ctx.stroke();
     ctx.restore();
   }
@@ -246,6 +260,8 @@ function render() {
     const isHov = hoverBlock && hoverBlock.id === b.id;
     drawShape(ctx, b, isSel, isHov);
   });
+
+  ctx.restore();
 }
 
 function anchor(a, b) {
@@ -269,26 +285,49 @@ canvas.addEventListener('mousemove', e => {
   const rect = canvas.getBoundingClientRect();
   mousePos = { x: e.clientX - rect.left, y: e.clientY - rect.top };
 
-  if (mode === 'drag' && dragStart && selected) {
-    selected.x = mousePos.x - offsetX;
-    selected.y = mousePos.y - offsetY;
+  if (isPanning) {
+    panX = panStartPanX + (e.clientX - panStartX);
+    panY = panStartPanY + (e.clientY - panStartY);
     render();
     return;
   }
 
-  const hit = hitTest(mousePos.x, mousePos.y);
+  const wp = screenToWorld(mousePos.x, mousePos.y);
+
+  if (mode === 'drag' && dragStart && selected) {
+    selected.x = wp.x - offsetX;
+    selected.y = wp.y - offsetY;
+    render();
+    return;
+  }
+
+  const hit = hitTest(wp.x, wp.y);
   if (hit !== hoverBlock) {
     hoverBlock = hit;
     render();
   }
 
-  canvas.style.cursor = hit ? 'pointer' : (mode === 'connect' ? 'crosshair' : 'default');
+  canvas.style.cursor = spaceDown ? 'grab' : (hit ? 'pointer' : (mode === 'connect' ? 'crosshair' : 'default'));
 });
 
 canvas.addEventListener('mousedown', e => {
   const rect = canvas.getBoundingClientRect();
-  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
-  const hit = hitTest(mx, my);
+  const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
+
+  // 中键或空格+左键 = 平移
+  if (e.button === 1 || (e.button === 0 && spaceDown)) {
+    isPanning = true;
+    panStartX = e.clientX;
+    panStartY = e.clientY;
+    panStartPanX = panX;
+    panStartPanY = panY;
+    canvas.style.cursor = 'grabbing';
+    e.preventDefault();
+    return;
+  }
+
+  const wp = screenToWorld(sx, sy);
+  const hit = hitTest(wp.x, wp.y);
 
   if (mode === 'connect') {
     if (hit) {
@@ -323,13 +362,13 @@ canvas.addEventListener('mousedown', e => {
     closeConnPanel();
     showNodePanel(hit);
     mode = 'drag';
-    dragStart = { x: mx, y: my };
-    offsetX = mx - hit.x;
-    offsetY = my - hit.y;
+    dragStart = { x: wp.x, y: wp.y };
+    offsetX = wp.x - hit.x;
+    offsetY = wp.y - hit.y;
     document.getElementById('btn-select').classList.add('active');
     render();
   } else {
-    const conn = hitTestConn(mx, my);
+    const conn = hitTestConn(wp.x, wp.y);
     if (conn) {
       selected = null;
       selectedConn = conn;
@@ -346,7 +385,12 @@ canvas.addEventListener('mousedown', e => {
   }
 });
 
-canvas.addEventListener('mouseup', () => {
+canvas.addEventListener('mouseup', e => {
+  if (isPanning) {
+    isPanning = false;
+    canvas.style.cursor = spaceDown ? 'grab' : 'default';
+    return;
+  }
   if (mode === 'drag') {
     mode = 'select';
     document.getElementById('btn-select').classList.add('active');
@@ -357,6 +401,35 @@ canvas.addEventListener('mouseleave', () => {
   mousePos = null;
   hoverBlock = null;
   render();
+});
+
+// 滚轮缩放
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+  const newZoom = Math.max(0.1, Math.min(5, zoom * factor));
+  // 以鼠标位置为中心缩放
+  panX = mx - (mx - panX) * (newZoom / zoom);
+  panY = my - (my - panY) * (newZoom / zoom);
+  zoom = newZoom;
+  render();
+}, { passive: false });
+
+// 空格键平移
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space' && !e.repeat && e.target.tagName !== 'TEXTAREA' && e.target.tagName !== 'SELECT') {
+    spaceDown = true;
+    canvas.style.cursor = 'grab';
+    e.preventDefault();
+  }
+});
+document.addEventListener('keyup', e => {
+  if (e.code === 'Space') {
+    spaceDown = false;
+    if (!isPanning) canvas.style.cursor = 'default';
+  }
 });
 
 function hitTest(mx, my) {
@@ -414,10 +487,12 @@ function enterConnectMode() {
 }
 
 function addBlock() {
+  const cx = (canvas.width / 2 - panX) / zoom;
+  const cy = (canvas.height / 2 - panY) / zoom;
   const b = {
     id: nextId++,
-    x: canvas.width / 2 + (Math.random() - 0.5) * 120,
-    y: canvas.height / 2 + (Math.random() - 0.5) * 80,
+    x: cx + (Math.random() - 0.5) * 120,
+    y: cy + (Math.random() - 0.5) * 80,
     w: MIN_W, h: MIN_H,
     shape: 'rect',
     color: '#e94560',
@@ -508,7 +583,7 @@ function updateNodeProp(key, val) {
 }
 
 async function saveChart() {
-  const data = { blocks, connections, nextId };
+  const data = { blocks, connections, nextId, panX, panY, zoom };
   const json = JSON.stringify(data, null, 2);
   if (window.showSaveFilePicker) {
     try {
@@ -549,6 +624,9 @@ function handleFileLoad(e) {
       blocks = data.blocks;
       connections = data.connections || [];
       nextId = data.nextId || (blocks.length ? Math.max(...blocks.map(b => b.id)) + 1 : 1);
+      panX = data.panX || 0;
+      panY = data.panY || 0;
+      zoom = data.zoom || 1;
       selected = null;
       selectedConn = null;
       closeNodePanel();
